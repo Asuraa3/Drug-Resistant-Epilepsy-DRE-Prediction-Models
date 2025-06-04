@@ -7,7 +7,7 @@
 
 > **Two state-of-the-art approaches for predicting drug-resistant epilepsy in newly diagnosed temporal lobe epilepsy patients using EEG data.**
 
-## 📋 Table of Contents
+##  Table of Contents
 
 - [Overview](#overview)
 - [Features](#features)
@@ -49,7 +49,7 @@ Both models achieve excellent performance and can be used independently or combi
 -  **Easy Integration**: Simple API for both training and prediction
 -  **Visualization Tools**: Training curves, performance plots, and network analysis
 
-## 🛠 Installation
+## Installation
 
 ### Prerequisites
 
