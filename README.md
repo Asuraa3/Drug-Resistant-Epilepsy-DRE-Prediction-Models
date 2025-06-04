@@ -448,14 +448,6 @@ flake8 src/
 black src/
 ```
 
-### Roadmap
-
-- [ ] Add support for more EEG file formats
-- [ ] Implement real-time prediction pipeline
-- [ ] Add model interpretability tools (SHAP, LIME)
-- [ ] Create web interface for clinical use
-- [ ] Add multi-center validation
-- [ ] Implement federated learning
 
 
 
