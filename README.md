@@ -56,21 +56,6 @@ Both models achieve excellent performance and can be used independently or combi
 - Python 3.8 or higher
 - CUDA-compatible GPU (recommended for CNN training)
 
-### Install Dependencies
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/dre-prediction.git
-cd dre-prediction
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\\Scripts\\activate
-
-# Install required packages
-pip install -r requirements.txt
-```
-
 ### Requirements.txt
 
 ```txt
