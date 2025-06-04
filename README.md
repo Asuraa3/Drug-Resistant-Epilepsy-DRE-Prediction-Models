@@ -294,17 +294,6 @@ clinical_features = [
 ]
 ```
 
-### Dataset Structure
-
-```
-data/
-├── eeg_recordings/
-│   ├── patient_001.edf
-│   ├── patient_002.edf
-│   └── ...
-├── clinical_data.csv
-└── labels.csv
-```
 
 ##  Performance
 
@@ -415,23 +404,7 @@ This implementation is based on two key research papers:
    - Integration of EEG and clinical features
 
 
-### Development Setup
 
-```bash
-# Clone repository
-git clone https://github.com/yourusername/dre-prediction.git
-cd dre-prediction
-
-# Install development dependencies
-pip install -r requirements-dev.txt
-
-# Run tests
-python -m pytest tests/
-
-# Run linting
-flake8 src/
-black src/
-```
 
 
 
