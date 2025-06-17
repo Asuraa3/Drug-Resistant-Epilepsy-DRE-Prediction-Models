@@ -28,6 +28,8 @@ from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
 
+
+
 class EEGConnectivityFeatures:
     """
     Extract EEG connectivity features as described in the paper.
@@ -36,21 +38,15 @@ class EEGConnectivityFeatures:
     
     def __init__(self, sfreq: int = 256):
         self.sfreq = sfreq
-        # Standard 10-20 electrode positions
-        self.all_channels = ['Fp1', 'Fp2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 
-                            'O1', 'O2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 
-                            'Fz', 'Cz', 'Pz']
-        
-        # Frontotemporal channels (key finding from paper)
-        self.frontotemporal_channels = ['F7', 'F8', 'T3', 'T4', 'F3', 'F4']
-        
+
+
     def bandpass_filter(self, data: np.ndarray, low_freq: float, high_freq: float) -> np.ndarray:
         """Apply bandpass filter to EEG data"""
         nyquist = self.sfreq / 2
         low = low_freq / nyquist
         high = high_freq / nyquist
         
-        b, a = signal.butter(4, [low, high], btype='band')
+        b, a = signal.butter(4, [low, high], btype='band')  #crea un filtro Butterworth di ordine 4 passa-banda.
         filtered_data = signal.filtfilt(b, a, data, axis=-1)
         return filtered_data
     
@@ -83,7 +79,8 @@ class EEGConnectivityFeatures:
                 pli_matrix[j, i] = pli_value  # Symmetric matrix
                 
         return pli_matrix
-    
+
+
     def calculate_clustering_coefficient(self, connectivity_matrix: np.ndarray, threshold_percentile: float = 75) -> float:
         """Calculate average clustering coefficient from connectivity matrix"""
         # Threshold connectivity matrix to create binary graph
@@ -120,7 +117,8 @@ class EEGConnectivityFeatures:
             avg_path_length = np.inf
             
         return avg_path_length
-    
+
+
     def calculate_global_efficiency(self, connectivity_matrix: np.ndarray) -> float:
         """Calculate global efficiency of the network"""
         G = nx.from_numpy_array(connectivity_matrix)
