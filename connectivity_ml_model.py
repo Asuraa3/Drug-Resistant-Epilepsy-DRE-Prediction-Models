@@ -216,24 +216,24 @@ class EEGConnectivityFeatures:
     def extract_frequency_band_features(self, eeg_data: np.ndarray) -> Dict[str, float]:
         """Extract features from different frequency bands"""
         frequency_bands = {
-            'delta': (1, 4),
+            'delta': (1, 4),    # Deep sleep waves
             'theta': (4, 8),    # Most important according to paper
-            'alpha': (8, 13),
-            'beta': (13, 30),
-            'gamma': (30, 45)
+            'alpha': (8, 13),   # Relaxed awareness
+            'beta': (13, 30),   # Active thinking
+            'gamma': (30, 45)   # High-level processing
         }
         
         features = {}
         
         for band_name, (fmin, fmax) in frequency_bands.items():
-            # Filter to frequency band
+            # Filter to specefic frequency band
             band_data = self.bandpass_filter(eeg_data, fmin, fmax)
             
-            # Calculate PLI
+            # Calculate PLI (connectivity in this frequency)
             band_pli = self.calculate_phase_lag_index(band_data)
             pli_upper = band_pli[np.triu_indices_from(band_pli, k=1)]
             
-            # Extract features
+            # Extract features for this frequency band
             features.update({
                 f'{band_name}_pli_mean': np.mean(pli_upper),
                 f'{band_name}_pli_std': np.std(pli_upper),
