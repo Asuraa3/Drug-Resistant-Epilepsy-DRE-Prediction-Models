@@ -46,10 +46,11 @@ class EEGConnectivityFeatures:
         
     def bandpass_filter(self, data: np.ndarray, low_freq: float, high_freq: float) -> np.ndarray:
         """Apply bandpass filter to EEG data"""
-        nyquist = self.sfreq / 2
-        low = low_freq / nyquist
+        nyquist = self.sfreq / 2 # Maximum frequency we can detect
+        low = low_freq / nyquist # Normalize frenquencies 
         high = high_freq / nyquist
-        
+
+        #Create and apply the filter
         b, a = signal.butter(4, [low, high], btype='band')
         filtered_data = signal.filtfilt(b, a, data, axis=-1)
         return filtered_data
