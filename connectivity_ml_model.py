@@ -198,9 +198,9 @@ class EEGConnectivityFeatures:
         pli_upper_triangle = ft_pli[np.triu_indices_from(ft_pli, k=1)]
         
         features = {
-            'ft_pli_mean': np.mean(pli_upper_triangle),
-            'ft_pli_std': np.std(pli_upper_triangle),
-            'ft_pli_max': np.max(pli_upper_triangle),
+            'ft_pli_mean': np.mean(pli_upper_triangle), # Average connectivity
+            'ft_pli_std': np.std(pli_upper_triangle),   # Variability 
+            'ft_pli_max': np.max(pli_upper_triangle),   # Strongest connection
             'ft_pli_min': np.min(pli_upper_triangle),
             'ft_pli_median': np.median(pli_upper_triangle),
             'ft_clustering_coeff': clustering_coeff,
