@@ -66,22 +66,24 @@ class EEGConnectivityFeatures:
         Returns:
             PLI matrix (channels x channels)
         """
+
         n_channels, n_times = data.shape
         pli_matrix = np.zeros((n_channels, n_channels))
         
-        # Get analytic signal using Hilbert transform
+        # Get the "phase" of each brain wave
         analytic_signals = signal.hilbert(data, axis=-1)
         phases = np.angle(analytic_signals)
-        
+
+        # Compare every pair of electrodes
         for i in range(n_channels):
             for j in range(i+1, n_channels):
-                # Phase difference
+                # Phase difference , how different are their phases?
                 phase_diff = phases[i] - phases[j]
                 
-                # PLI calculation
+                # PLI calculation - measure consistency of phase difference
                 pli_value = np.abs(np.mean(np.sign(np.sin(phase_diff))))
                 pli_matrix[i, j] = pli_value
-                pli_matrix[j, i] = pli_value  # Symmetric matrix
+                pli_matrix[j, i] = pli_value  # Symmetric matrix - Mirror the matrix
                 
         return pli_matrix
     
