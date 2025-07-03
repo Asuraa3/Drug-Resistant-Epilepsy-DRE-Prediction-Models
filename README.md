@@ -20,9 +20,6 @@
 - [Data Requirements](#data-requirements)
 - [Performance](#performance)
 - [API Reference](#api-reference)
-- [Contributing](#contributing)
-- [Citation](#citation)
-- [License](#license)
 
 ##  Overview
 
