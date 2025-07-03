@@ -1,0 +1,6 @@
+edf_folder: 'C:\Users\Elisa\OneDrive - Unimore\epilepsy_data_human\20_channels'
+excel_path: 'C:\Users\Elisa\OneDrive - Unimore\epilepsy_data_human\complete_dataset\file_mapping.xlsx'
+target_freq: 128
+min_len: 1000000000
+num_classes: 1
+num_epochs: 100
