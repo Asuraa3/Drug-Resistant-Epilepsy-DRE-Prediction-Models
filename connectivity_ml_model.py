@@ -6,9 +6,14 @@ in newly diagnosed patients with temporal lobe epilepsy"
 This implementation focuses on Phase Lag Index (PLI) and graph theory features
 from frontotemporal networks in the theta band (4-8 Hz).
 """
-
 import numpy as np
 import pandas as pd
+import mne
+from mne.connectivity import phase_lag_index, spectral_connectivity_epochs
+from mne.time_frequency import psd_welch
+import os
+import glob
+from pathlib import Path
 from sklearn.ensemble import BaggingClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.naive_bayes import GaussianNB
@@ -20,8 +25,6 @@ from sklearn.model_selection import cross_val_score, StratifiedKFold, train_test
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 import networkx as nx
-from scipy import signal
-from scipy.stats import pearsonr
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, List, Tuple, Optional
@@ -307,10 +310,7 @@ class EEGConnectivityFeatures:
         return np.mean(((data - mean) / std) ** 4) - 3
 
 class DREPredictor:
-    """
-    Drug-Resistant Epilepsy Predictor based on connectivity features.
-    Implements the methodology from the paper with Tree Bagger as best model.
-    """
+    """Drug-Resistant Epilepsy Predictor based on connectivity features."""
     
     def __init__(self):
         self.feature_extractor = EEGConnectivityFeatures()
@@ -323,22 +323,17 @@ class DREPredictor:
     def _initialize_models(self) -> Dict:
         """Initialize all models used in the paper"""
         models = {
-            # Tree Bagger (Best performing in paper - 91.5% accuracy)
             'tree_bagger': BaggingClassifier(
                 estimator=DecisionTreeClassifier(random_state=42, max_depth=10),
                 n_estimators=100,
                 random_state=42,
                 n_jobs=-1
             ),
-            
-            # Traditional ML algorithms from paper
             'naive_bayes': GaussianNB(),
             'svm': SVC(probability=True, random_state=42, kernel='rbf'),
             'knn': KNeighborsClassifier(n_neighbors=5),
             'logistic_regression': LogisticRegression(random_state=42, max_iter=1000),
             'linear_discriminant': LinearDiscriminantAnalysis(),
-            
-            # Additional ensemble methods
             'subspace_knn': BaggingClassifier(
                 estimator=KNeighborsClassifier(n_neighbors=3),
                 n_estimators=50,
@@ -349,18 +344,123 @@ class DREPredictor:
         }
         return models
     
-    def extract_features_from_data(self, eeg_data_list: List[np.ndarray], 
-                                 channel_names_list: List[List[str]]) -> pd.DataFrame:
-        """
-        Extract features from list of EEG data arrays.
+    def create_labels_template(self, data_directory: str):
+        """Create a CSV template for labeling EDF files as DRE or Non-DRE."""
+        edf_files = glob.glob(os.path.join(data_directory, "*.edf"))
+        edf_files.extend(glob.glob(os.path.join(data_directory, "*.EDF")))
         
-        Args:
-            eeg_data_list: List of EEG data arrays (each: channels x time_points)
-            channel_names_list: List of channel name lists for each EEG data
+        if len(edf_files) == 0:
+            print(f"No EDF files found in {data_directory}")
+            return None
+        
+        filenames = [Path(f).stem for f in sorted(edf_files)]
+        labels_df = pd.DataFrame({
+            'filename': filenames,
+            'label': [0] * len(filenames),
+            'notes': [''] * len(filenames)
+        })
+        
+        output_path = os.path.join(data_directory, "labels.csv")
+        labels_df.to_csv(output_path, index=False)
+        
+        print(f"Created labels template: {output_path}")
+        print("Please edit this file and set:")
+        print("  label = 0 for Non-DRE (drug responsive) patients")
+        print("  label = 1 for DRE (drug resistant) patients")
+        
+        return output_path
+    
+    def load_edf_files(self, data_directory: str, labels_file: str = None, 
+                      duration_seconds: int = 60) -> Tuple[List[np.ndarray], List[List[str]], np.ndarray]:
+        """Load EDF files from directory"""
+        
+        # Check if MNE is available
+        try:
+            import mne
+        except ImportError:
+            raise ImportError("MNE package required for EDF loading. Install with: pip install mne")
+        
+        # Find EDF files
+        edf_files = glob.glob(os.path.join(data_directory, "*.edf"))
+        edf_files.extend(glob.glob(os.path.join(data_directory, "*.EDF")))
+        edf_files = sorted(edf_files)
+        
+        print(f"Found {len(edf_files)} EDF files in {data_directory}")
+        
+        if len(edf_files) == 0:
+            raise ValueError(f"No EDF files found in {data_directory}")
+        
+        # Load labels if provided
+        labels_dict = {}
+        if labels_file and os.path.exists(labels_file):
+            labels_df = pd.read_csv(labels_file)
+            print(f"Loaded labels from {labels_file}")
             
-        Returns:
-            DataFrame with extracted features
-        """
+            filename_col = None
+            label_col = None
+            
+            for col in labels_df.columns:
+                if 'file' in col.lower() or 'name' in col.lower():
+                    filename_col = col
+                if 'label' in col.lower() or 'dre' in col.lower() or 'class' in col.lower():
+                    label_col = col
+            
+            if filename_col and label_col:
+                for _, row in labels_df.iterrows():
+                    filename = str(row[filename_col]).replace('.edf', '').replace('.EDF', '')
+                    labels_dict[filename] = int(row[label_col])
+                print(f"Loaded {len(labels_dict)} labels")
+        
+        # Load EDF files
+        eeg_data_list = []
+        channel_names_list = []
+        labels = []
+        
+        for i, file_path in enumerate(edf_files):
+            try:
+                print(f"Loading {i+1}/{len(edf_files)}: {os.path.basename(file_path)}")
+                
+                raw = mne.io.read_raw_edf(file_path, preload=True, verbose=False)
+                
+                if raw.info['sfreq'] != 256:
+                    print(f"  Resampling from {raw.info['sfreq']} Hz to 256 Hz")
+                    raw.resample(256)
+                
+                if duration_seconds and raw.times[-1] > duration_seconds:
+                    raw.crop(tmax=duration_seconds)
+                    print(f"  Cropped to {duration_seconds} seconds")
+                
+                data = raw.get_data()
+                channel_names = [ch.strip().replace(' ', '') for ch in raw.ch_names]
+                
+                eeg_data_list.append(data)
+                channel_names_list.append(channel_names)
+                
+                filename = Path(file_path).stem
+                if filename in labels_dict:
+                    label = labels_dict[filename]
+                elif any(keyword in filename.lower() for keyword in ['dre', 'resistant']):
+                    label = 1
+                elif any(keyword in filename.lower() for keyword in ['responsive', 'nondre']):
+                    label = 0
+                else:
+                    label = i % 2
+                    print(f"  No label found, using default: {label}")
+                
+                labels.append(label)
+                print(f"  Shape: {data.shape}, Label: {'DRE' if label == 1 else 'Non-DRE'}")
+                
+            except Exception as e:
+                print(f"  Error loading {file_path}: {e}")
+                continue
+        
+        print(f"\nSuccessfully loaded {len(eeg_data_list)} files")
+        print(f"DRE patients: {np.sum(labels)} ({np.mean(labels)*100:.1f}%)")
+        
+        return eeg_data_list, channel_names_list, np.array(labels)
+    
+    def extract_features_from_data(self, eeg_data_list: List[np.ndarray], channel_names_list: List[List[str]]) -> pd.DataFrame:
+        """Extract features from list of EEG data arrays."""
         all_features = []
         
         print(f"Extracting features from {len(eeg_data_list)} EEG recordings...")
@@ -373,19 +473,13 @@ class DREPredictor:
                 all_features.append(features)
             except Exception as e:
                 print(f"Error processing recording {i+1}: {e}")
-                # Add empty features for failed recordings
                 if all_features:
-                    # Use previous successful extraction as template
                     empty_features = {key: 0.0 for key in all_features[0].keys()}
                     all_features.append(empty_features)
                 else:
-                    # Skip this recording
                     continue
         
-        # Convert to DataFrame
         feature_df = pd.DataFrame(all_features)
-        
-        # Handle any remaining NaN or inf values
         feature_df = feature_df.replace([np.inf, -np.inf], np.nan)
         feature_df = feature_df.fillna(0)
         
@@ -394,32 +488,17 @@ class DREPredictor:
         
         return feature_df
     
-    def train_and_evaluate(self, X: pd.DataFrame, y: np.ndarray, 
-                          cv_folds: int = 5, test_size: float = 0.2) -> Dict:
-        """
-        Train and evaluate all models using cross-validation.
+    def train_and_evaluate(self, X: pd.DataFrame, y: np.ndarray, cv_folds: int = 5, test_size: float = 0.2) -> Dict:
+        """Train and evaluate all models using cross-validation."""
+        print(f"Training models on {X.shape[0]} samples with {X.shape[1]} features")
         
-        Args:
-            X: Feature matrix
-            y: Labels (0: Non-DRE, 1: DRE)
-            cv_folds: Number of cross-validation folds
-            test_size: Proportion of data for testing
-            
-        Returns:
-            Dictionary with performance metrics for each model
-        """
-        print(f"Training and evaluating models on {X.shape[0]} samples with {X.shape[1]} features")
-        
-        # Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=42, stratify=y
         )
         
-        # Standardize features
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # Cross-validation setup
         cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
         
         results = {}
@@ -429,32 +508,25 @@ class DREPredictor:
             print(f"\nEvaluating {model_name}...")
             
             try:
-                # Cross-validation scores
                 cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='accuracy')
                 
-                # Train on full training set
                 model.fit(X_train_scaled, y_train)
                 
-                # Predictions
                 y_train_pred = model.predict(X_train_scaled)
                 y_test_pred = model.predict(X_test_scaled)
                 
-                # Probabilities (if available)
                 if hasattr(model, 'predict_proba'):
                     y_test_prob = model.predict_proba(X_test_scaled)[:, 1]
                 else:
                     y_test_prob = y_test_pred
                 
-                # Calculate metrics
                 train_accuracy = accuracy_score(y_train, y_train_pred)
                 test_accuracy = accuracy_score(y_test, y_test_pred)
                 
-                # Sensitivity and Specificity
                 tn, fp, fn, tp = confusion_matrix(y_test, y_test_pred).ravel()
                 sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
                 specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
                 
-                # AUC
                 try:
                     auc = roc_auc_score(y_test, y_test_prob)
                 except:
@@ -475,9 +547,7 @@ class DREPredictor:
                 print(f"  Test Accuracy: {test_accuracy:.3f}")
                 print(f"  Sensitivity: {sensitivity:.3f}")
                 print(f"  Specificity: {specificity:.3f}")
-                print(f"  AUC: {auc:.3f}")
                 
-                # Track best model based on CV accuracy
                 if cv_scores.mean() > best_score:
                     best_score = cv_scores.mean()
                     self.best_model = model
@@ -485,73 +555,44 @@ class DREPredictor:
                     
             except Exception as e:
                 print(f"  Error evaluating {model_name}: {e}")
-                results[model_name] = {
-                    'cv_accuracy_mean': 0,
-                    'cv_accuracy_std': 0,
-                    'train_accuracy': 0,
-                    'test_accuracy': 0,
-                    'sensitivity': 0,
-                    'specificity': 0,
-                    'auc': 0.5,
-                    'error': str(e)
-                }
         
         print(f"\nBest model: {self.best_model_name} with CV accuracy: {best_score:.3f}")
-        
         return results
     
     def predict_dre(self, eeg_data: np.ndarray, channel_names: List[str]) -> Dict:
-        """
-        Predict DRE for new patient.
-        
-        Args:
-            eeg_data: EEG data (channels x time_points)
-            channel_names: List of channel names
-            
-        Returns:
-            Dictionary with prediction results
-        """
+        """Predict DRE for new patient."""
         if self.best_model is None:
-            raise ValueError("Model not trained yet. Call train_and_evaluate first.")
+            raise ValueError("Model not trained yet.")
         
-        # Extract features
         features = self.feature_extractor.extract_all_features(eeg_data, channel_names)
-        
-        # Convert to DataFrame with same columns as training
         feature_df = pd.DataFrame([features])
         
-        # Ensure all training features are present
         for col in self.feature_names:
             if col not in feature_df.columns:
                 feature_df[col] = 0.0
         
-        # Reorder columns to match training
         feature_df = feature_df[self.feature_names]
-        
-        # Scale features
         feature_vector_scaled = self.scaler.transform(feature_df)
         
-        # Predict
         prediction = self.best_model.predict(feature_vector_scaled)[0]
         
         if hasattr(self.best_model, 'predict_proba'):
             probabilities = self.best_model.predict_proba(feature_vector_scaled)[0]
-            probability = probabilities[1]  # Probability of DRE
+            probability = probabilities[1]
         else:
             probability = float(prediction)
             probabilities = [1-probability, probability]
         
         return {
-            'prediction': int(prediction),  # 0: Non-DRE, 1: DRE
+            'prediction': int(prediction),
             'probability_dre': probability,
-            'probabilities': probabilities,  # [Non-DRE, DRE]
+            'probabilities': probabilities,
             'model_used': self.best_model_name,
             'risk_level': 'High' if probability > 0.7 else 'Medium' if probability > 0.3 else 'Low'
         }
     
     def plot_results(self, results: Dict) -> None:
         """Plot model comparison results"""
-        # Prepare data for plotting
         models = []
         accuracies = []
         sensitivities = []
@@ -566,11 +607,9 @@ class DREPredictor:
                 specificities.append(metrics['specificity'])
                 aucs.append(metrics['auc'])
         
-        # Create subplots
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         fig.suptitle('Model Performance Comparison', fontsize=16)
         
-        # Accuracy
         axes[0, 0].bar(models, accuracies, color='skyblue')
         axes[0, 0].set_title('Test Accuracy')
         axes[0, 0].set_ylabel('Accuracy')
@@ -578,25 +617,22 @@ class DREPredictor:
         axes[0, 0].axhline(y=0.915, color='red', linestyle='--', label='Paper Target (91.5%)')
         axes[0, 0].legend()
         
-        # Sensitivity
         axes[0, 1].bar(models, sensitivities, color='lightgreen')
-        axes[0, 1].set_title('Sensitivity (True Positive Rate)')
+        axes[0, 1].set_title('Sensitivity')
         axes[0, 1].set_ylabel('Sensitivity')
         axes[0, 1].tick_params(axis='x', rotation=45)
         axes[0, 1].axhline(y=0.97, color='red', linestyle='--', label='Paper Target (97%)')
         axes[0, 1].legend()
         
-        # Specificity
         axes[1, 0].bar(models, specificities, color='lightcoral')
-        axes[1, 0].set_title('Specificity (True Negative Rate)')
+        axes[1, 0].set_title('Specificity')
         axes[1, 0].set_ylabel('Specificity')
         axes[1, 0].tick_params(axis='x', rotation=45)
         axes[1, 0].axhline(y=0.81, color='red', linestyle='--', label='Paper Target (81%)')
         axes[1, 0].legend()
         
-        # AUC
         axes[1, 1].bar(models, aucs, color='gold')
-        axes[1, 1].set_title('AUC (Area Under Curve)')
+        axes[1, 1].set_title('AUC')
         axes[1, 1].set_ylabel('AUC')
         axes[1, 1].tick_params(axis='x', rotation=45)
         axes[1, 1].axhline(y=0.92, color='red', linestyle='--', label='Paper Target (0.92)')
@@ -605,149 +641,62 @@ class DREPredictor:
         plt.tight_layout()
         plt.show()
 
-# Example usage and testing
-def generate_synthetic_eeg_data(n_patients: int = 50, n_channels: int = 19, 
-                               duration_seconds: int = 60, sfreq: int = 256) -> Tuple[List[np.ndarray], List[List[str]], np.ndarray]:
-    """
-    Generate synthetic EEG data for testing the implementation.
-    In real use, replace this with your actual EEG data loading function.
-    """
-    print(f"Generating synthetic EEG data for {n_patients} patients...")
-    
-    # Standard 10-20 electrode names
-    channel_names = ['Fp1', 'Fp2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 
-                    'O1', 'O2', 'F7', 'F8', 'T3', 'T4', 'T5', 'T6', 
-                    'Fz', 'Cz', 'Pz'][:n_channels]
-    
-    eeg_data_list = []
-    channel_names_list = []
-    labels = []
-    
-    n_timepoints = duration_seconds * sfreq
-    
-    for i in range(n_patients):
-        # Generate synthetic EEG data
-        # Add some realistic characteristics: 1/f noise + oscillations
-        base_signal = np.random.randn(n_channels, n_timepoints)
-        
-        # Add some frequency-specific content
-        t = np.linspace(0, duration_seconds, n_timepoints)
-        
-        # Add alpha rhythm (8-12 Hz) - stronger in posterior channels
-        alpha_freq = 10
-        for ch in range(n_channels):
-            if 'O' in channel_names[ch] or 'P' in channel_names[ch]:
-                alpha_amplitude = 2.0
-            else:
-                alpha_amplitude = 0.5
-            base_signal[ch] += alpha_amplitude * np.sin(2 * np.pi * alpha_freq * t)
-        
-        # Add theta rhythm (4-8 Hz) - important for DRE prediction
-        theta_freq = 6
-        theta_amplitude = 1.0
-        
-        # For DRE patients, increase theta connectivity in frontotemporal regions
-        is_dre = i < n_patients // 3  # First third are DRE patients
-        
-        if is_dre:
-            # Increase theta power and synchronization in frontotemporal channels
-            for ch in range(n_channels):
-                if any(region in channel_names[ch] for region in ['F7', 'F8', 'T3', 'T4', 'F3', 'F4']):
-                    theta_amplitude_ch = 2.5  # Stronger theta
-                    # Add some phase coupling
-                    phase_offset = np.random.uniform(0, np.pi/4)  # Small phase offset for coupling
-                else:
-                    theta_amplitude_ch = theta_amplitude
-                    phase_offset = np.random.uniform(0, 2*np.pi)  # Random phase
-                
-                base_signal[ch] += theta_amplitude_ch * np.sin(2 * np.pi * theta_freq * t + phase_offset)
-        else:
-            # Normal theta activity
-            for ch in range(n_channels):
-                phase_offset = np.random.uniform(0, 2*np.pi)
-                base_signal[ch] += theta_amplitude * np.sin(2 * np.pi * theta_freq * t + phase_offset)
-        
-        # Apply 1/f scaling to make it more realistic
-        for ch in range(n_channels):
-            # Simple 1/f filter approximation
-            freqs = np.fft.fftfreq(n_timepoints, 1/sfreq)
-            fft_signal = np.fft.fft(base_signal[ch])
-            # Apply 1/f scaling (avoid division by zero)
-            scaling = 1 / np.sqrt(np.abs(freqs) + 1)
-            fft_signal *= scaling
-            base_signal[ch] = np.real(np.fft.ifft(fft_signal))
-        
-        eeg_data_list.append(base_signal)
-        channel_names_list.append(channel_names.copy())
-        labels.append(1 if is_dre else 0)
-    
-    return eeg_data_list, channel_names_list, np.array(labels)
-
 def main():
-    """
-    Main function demonstrating the connectivity-based DRE prediction.
-    """
-    print("=== Connectivity-Based DRE Prediction Implementation ===\n")
+    """Main function for EDF-based DRE prediction"""
     
-    # Generate synthetic data (replace with your real data loading)
-    eeg_data_list, channel_names_list, labels = generate_synthetic_eeg_data(
-        n_patients=100, n_channels=19, duration_seconds=60
-    )
+    EDF_DIRECTORY = r"first package\Patient_1"
+    LABELS_FILE = r"first package\Patient_1\labels.csv"
+    DURATION_SECONDS = 60
     
-    print(f"Loaded {len(eeg_data_list)} EEG recordings")
-    print(f"DRE patients: {np.sum(labels)} ({np.mean(labels)*100:.1f}%)")
-    print(f"Non-DRE patients: {len(labels) - np.sum(labels)} ({(1-np.mean(labels))*100:.1f}%)")
+    print("=== EDF-Based DRE Prediction ===\n")
     
-    # Initialize predictor
+    if not os.path.exists(EDF_DIRECTORY):
+        print(f"ERROR: Directory not found: {EDF_DIRECTORY}")
+        return
+    
     predictor = DREPredictor()
     
-    # Extract features
+    if not os.path.exists(LABELS_FILE):
+        print("Creating labels template...")
+        predictor.create_labels_template(EDF_DIRECTORY)
+        print("Please edit the labels.csv file and run again.")
+        return
+    
+    try:
+        eeg_data_list, channel_names_list, labels = predictor.load_edf_files(
+            EDF_DIRECTORY, LABELS_FILE, DURATION_SECONDS
+        )
+    except Exception as e:
+        print(f"Error loading EDF files: {e}")
+        return
+    
+    if len(eeg_data_list) == 0:
+        print("No EDF files loaded successfully!")
+        return
+    
     print("\n=== Feature Extraction ===")
     feature_matrix = predictor.extract_features_from_data(eeg_data_list, channel_names_list)
-    print(f"Feature matrix shape: {feature_matrix.shape}")
     
-    # Train and evaluate models
-    print("\n=== Model Training and Evaluation ===")
+    print("\n=== Model Training ===")
     results = predictor.train_and_evaluate(feature_matrix, labels)
     
-    # Print detailed results
-    print("\n=== Detailed Results ===")
-    print(f"{'Model':<20} {'CV Acc':<10} {'Test Acc':<10} {'Sens':<8} {'Spec':<8} {'AUC':<8}")
-    print("-" * 70)
+    print("\n" + "="*70)
+    print("RESULTS SUMMARY")
+    print("="*70)
     
     for model_name, metrics in results.items():
         if 'error' not in metrics:
-            print(f"{model_name:<20} {metrics['cv_accuracy_mean']:.3f}±{metrics['cv_accuracy_std']:.3f} "
-                  f"{metrics['test_accuracy']:.3f}     {metrics['sensitivity']:.3f}   "
-                  f"{metrics['specificity']:.3f}   {metrics['auc']:.3f}")
+            print(f"{model_name}: {metrics['test_accuracy']:.3f} accuracy")
     
-    # Test prediction on new patient
-    print(f"\n=== Testing Prediction ===")
-    test_eeg = eeg_data_list[0]  # Use first patient as example
-    test_channels = channel_names_list[0]
+    print(f"\n=== Example Prediction ===")
+    test_result = predictor.predict_dre(eeg_data_list[0], channel_names_list[0])
+    print(f"Prediction: {'DRE' if test_result['prediction'] == 1 else 'Non-DRE'}")
+    print(f"Confidence: {test_result['probability_dre']:.3f}")
     
-    prediction_result = predictor.predict_dre(test_eeg, test_channels)
-    
-    print(f"Patient prediction:")
-    print(f"  Predicted class: {'DRE' if prediction_result['prediction'] == 1 else 'Non-DRE'}")
-    print(f"  DRE probability: {prediction_result['probability_dre']:.3f}")
-    print(f"  Risk level: {prediction_result['risk_level']}")
-    print(f"  Model used: {prediction_result['model_used']}")
-    print(f"  Actual label: {'DRE' if labels[0] == 1 else 'Non-DRE'}")
-    
-    # Plot results
     try:
         predictor.plot_results(results)
     except:
-        print("Plotting not available in this environment")
-    
-    print(f"\n=== Expected Performance (from paper) ===")
-    print(f"Target Accuracy: 91.5%")
-    print(f"Target Sensitivity: 97%")
-    print(f"Target Specificity: 81%")
-    print(f"Target AUC: 0.92")
-    
-    print(f"\nImplementation complete! Best model: {predictor.best_model_name}")
+        print("Plotting not available")
 
 if __name__ == "__main__":
     main()
