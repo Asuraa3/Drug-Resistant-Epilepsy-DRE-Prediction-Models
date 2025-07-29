@@ -1,0 +1,12 @@
+Model Performance on Held-Out Test Set:
+----------------------------------------
+Accuracy: 0.700
+Sensitivity (Recall): 0.333
+Specificity: 1.000
+AUC: 0.605
+----------------------------------------
+Confusion Matrix Details:
+  True Positives (TP): 6
+  False Negatives (FN): 12
+  False Positives (FP): 0
+  True Negatives (TN): 22

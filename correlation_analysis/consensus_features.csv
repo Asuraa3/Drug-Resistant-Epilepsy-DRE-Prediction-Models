@@ -1,0 +1,16 @@
+feature
+alpha_pli_std
+delta_pli_std
+gamma_clustering_coefficient
+beta_path_length
+theta_power_std
+theta_pli_std
+ft_theta_pli_std
+alpha_pli_mean
+beta_clustering_coefficient
+whole_brain_clustering_coefficient
+delta_pli_mean
+gamma_pli_std
+ft_theta_pli_mean
+theta_pli_mean
+theta_modularity

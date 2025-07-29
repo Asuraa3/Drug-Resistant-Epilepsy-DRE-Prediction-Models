@@ -11,8 +11,6 @@ This implementation follows the exact methodology from the research paper:
 5. Multiple ML algorithms (Tree Bagger achieved 91.5% accuracy)
 6. 5-fold cross-validation
 """
-#from visualizations import plot_connectivity_matrix, plot_network_graph, plot_feature_importance, plot_confusion_matrix
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -38,6 +36,9 @@ import matplotlib.pyplot as plt
 from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
+
+# Import for BalancedBaggingClassifier and RUSBoostClassifier
+from imblearn.ensemble import BalancedBaggingClassifier, RUSBoostClassifier
 
 class PaperMethodologyDREPredictor:
     """
@@ -76,22 +77,34 @@ class PaperMethodologyDREPredictor:
         
         # Paper's ML algorithms
         self.models = {
-            # Tree Bagger (Best: 91.5% accuracy, 97% sensitivity, 81% specificity)
             'tree_bagger': BaggingClassifier(
-                estimator=DecisionTreeClassifier(random_state=42, max_depth=10, class_weight='balanced'),
-                n_estimators=100,
+                estimator=DecisionTreeClassifier(random_state=42, max_depth=15 , class_weight='balanced'),
+                n_estimators=150,
                 random_state=42,
                 n_jobs=-1
             ),
+            'balanced_tree_bagger': BalancedBaggingClassifier(
+                estimator=DecisionTreeClassifier(random_state=42, max_depth=15),
+                n_estimators=150,
+                random_state=42,
+                n_jobs=-1,
+                sampling_strategy='auto'
+            ),
             'naive_bayes': GaussianNB(),
             'svm': SVC(probability=True, random_state=42, kernel='rbf', class_weight='balanced'),
-            'knn': KNeighborsClassifier(n_neighbors=5),
+            'knn': KNeighborsClassifier(n_neighbors=9),
             'logistic_regression': LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced'),
             'linear_discriminant': LinearDiscriminantAnalysis(),
             'subspace_knn': BaggingClassifier(
                 estimator=KNeighborsClassifier(n_neighbors=3),
                 n_estimators=50,
                 max_features=0.8,
+                random_state=42
+            ),
+            # NEW: RUSBoosted Tree from the paper
+            'rusboost_tree': RUSBoostClassifier(
+                estimator=DecisionTreeClassifier(max_depth=5, random_state=42), # Using a shallow tree as base estimator
+                n_estimators=100,
                 random_state=42
             )
         }
@@ -103,6 +116,7 @@ class PaperMethodologyDREPredictor:
         Paper preprocessing:
         - 0.1-45 Hz band-pass filter
         - Decomposition into frequency bands
+        - Common average reference
         """
         print(f"Loading: {os.path.basename(file_path)}")
         
@@ -317,7 +331,7 @@ class PaperMethodologyDREPredictor:
                 
             except Exception as e:
                 print(f"    Warning: {band_name} band processing failed: {e}")
-        
+    
         return features
     
     def extract_whole_brain_features(self, raw: mne.io.Raw) -> Dict[str, float]:
@@ -412,88 +426,118 @@ class PaperMethodologyDREPredictor:
         
         return features
     
-    def load_dataset(self, data_directory: str, labels_file: str = None,  duration_seconds: int = 60) -> Tuple[List[Dict], np.ndarray]:
+    def load_dataset(self, data_directory: str, labels_file: str = None,  duration_seconds: int = 120) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray]:
         # Find EDF files
         edf_files = sorted(glob.glob(os.path.join(data_directory, "*.edf")))
         print(f"Found {len(edf_files)} EDF files")
 
-        # Load labels
+        # Load labels and patient IDs
         labels_dict = {}
+        patient_info_df = None
         if labels_file and os.path.exists(labels_file):
-            labels_df = pd.read_csv(labels_file)
+            patient_info_df = pd.read_csv(labels_file)
+            # Ensure 'filename', 'label', 'patient_id' are present
+            if not {'filename', 'label', 'patient_id'}.issubset(patient_info_df.columns):
+                raise ValueError("Labels file must contain 'filename', 'label', and 'patient_id' columns for patient-level splitting. Please update your labels.csv.")
 
-            # Check required columns
-            if not {'filename', 'label'}.issubset(labels_df.columns):
-                raise ValueError("Labels file must contain 'filename' and 'label' columns")
-
-            for _, row in labels_df.iterrows():
-                # Normalize filename (remove extension, lowercase, no spaces)
-                filename = str(row['filename']).strip().lower().replace(' ', '_')
-                filename = Path(filename).stem  # Remove extension
-                labels_dict[filename] = int(row['label'])
-
-            print(f" Loaded {len(labels_dict)} labels from {labels_file}")
+            for _, row in patient_info_df.iterrows():
+                filename = Path(str(row['filename'])).stem.strip().lower()
+                labels_dict[filename] = (int(row['label']), str(row['patient_id'])) # Store (label, patient_id) tuple
+            print(f" Loaded {len(labels_dict)} entries (with patient IDs) from {labels_file}")
             print(f"Sample label keys: {list(labels_dict.keys())[:5]}")
         else:
-            print(f"No labels file found, defaulting to Non-DRE (0) for all")
-            labels_dict = {Path(f).stem.lower(): 0 for f in edf_files}
+            print(f"Error: No labels file found or missing 'patient_id' column. Cannot perform patient-level splitting.")
+            print("Please ensure your labels.csv exists and contains 'filename', 'label', and 'patient_id' columns.")
+            return pd.DataFrame(), np.array([]), np.array([]) # Return empty if critical info is missing
 
-        all_features = []
-        labels = []
+        all_processed_data = [] # Store dictionaries with features, label, and patient_id
 
         for i, file_path in enumerate(edf_files):
-            filename = Path(file_path).stem.strip().lower()
-            print(f"\nProcessing file {i + 1}/{len(edf_files)}: {filename}.edf")
+            filename_stem = Path(file_path).stem.strip().lower()
+            print(f"\nProcessing file {i + 1}/{len(edf_files)}: {filename_stem}.edf")
 
-            # Load and preprocess EEG data
             raw = self.load_edf_with_mne(file_path, duration_seconds)
 
             if raw is not None:
                 try:
                     features = self.extract_all_features(raw)
-                    all_features.append(features)
-
-                    if filename in labels_dict:
-                        label = labels_dict[filename]
+                    
+                    if filename_stem in labels_dict:
+                        label, patient_id = labels_dict[filename_stem]
                     else:
-                        print(f"  WARNING: No label found for {filename}, defaulting to Non-DRE (0)")
-                        label = 0
-
-                    labels.append(label)
-                    print(f"  Label: {'DRE' if label == 1 else 'Non-DRE'}")
+                        print(f"  WARNING: No label/patient_id found for {filename_stem}. Skipping this file.")
+                        continue # Skip file if no label/patient_id information
+                    
+                    # Add label and patient_id to the features dictionary
+                    features['label'] = label
+                    features['patient_id'] = patient_id
+                    all_processed_data.append(features)
+                    
+                    print(f"  Label: {'DRE' if label == 1 else 'Non-DRE'}, Patient ID: {patient_id}")
 
                 except Exception as e:
-                    print(f" ERROR extracting features from {filename}: {e}")
+                    print(f" ERROR extracting features from {filename_stem}: {e}")
                     continue
             else:
-                print(f"  Skipping file due to loading error: {filename}")
+                print(f"  Skipping file due to loading error: {filename_stem}")
                 continue
 
-        if len(labels) == 0:
+        if len(all_processed_data) == 0:
             print(" No data processed successfully!")
-            return [], np.array([])
+            return pd.DataFrame(), np.array([]), np.array([])
 
-        print(f"\n Processed {len(all_features)} files successfully")
-        print(f" Label distribution: {np.bincount(labels)} (DRE count: {np.sum(labels)})")
-        print(f"DRE patients: {np.sum(labels)} ({np.mean(labels) * 100:.1f}%)")
+        print(f"\n Processed {len(all_processed_data)} files successfully")
+        
+        # Convert list of dictionaries to a DataFrame
+        final_df = pd.DataFrame(all_processed_data)
+        
+        # Extract features, labels, patient_ids
+        final_labels = final_df['label'].values
+        final_patient_ids = final_df['patient_id'].values
+        # Features are all other columns
+        final_feature_df = final_df.drop(columns=['label', 'patient_id'])
 
-        return all_features, np.array(labels)
+        # Load consensus features and filter the DataFrame
+        consensus_features_path = 'correlation_analysis/consensus_features.csv'
+        if os.path.exists(consensus_features_path):
+            consensus_features_df = pd.read_csv(consensus_features_path)
+            consensus_feature_names = consensus_features_df['feature'].tolist()
+            
+            # Filter final_feature_df to only include consensus features
+            # Ensure all consensus features are in the extracted features, fill with 0 if not (shouldn't happen if extraction is consistent)
+            missing_consensus_features = [f for f in consensus_feature_names if f not in final_feature_df.columns]
+            if missing_consensus_features:
+                print(f"  WARNING: Missing consensus features in extracted data: {missing_consensus_features}. Filling with 0.")
+                for f in missing_consensus_features:
+                    final_feature_df[f] = 0.0
+            
+            # Select only the consensus features, maintaining their order
+            final_feature_df = final_feature_df[consensus_feature_names]
+            print(f"  Filtered features to {len(consensus_feature_names)} consensus features.")
+        else:
+            print(f"  WARNING: Consensus features file not found at {consensus_features_path}. Using all extracted features.")
+
+        print(f" Label distribution: {np.bincount(final_labels)} (DRE count: {np.sum(final_labels)})")
+        print(f"Number of unique patients: {len(np.unique(final_patient_ids))}")
+
+        return final_feature_df, final_labels, final_patient_ids
 
 
-
-    
-    def train_and_evaluate(self, features_list: List[Dict], labels: np.ndarray) -> Dict:
+    def train_and_evaluate(self, feature_df: pd.DataFrame, labels: np.ndarray, patient_ids: np.ndarray) -> Dict:
         """
-        STEP 7: Train and evaluate ML models (Paper methodology)
+        STEP 7: Train and evaluate ML models (Paper methodology) with patient-level splitting.
         
         Paper validation: 5-fold cross-validation
         Paper best result: Tree Bagger with 91.5% accuracy
         """
-
-        # Convert to DataFrame
-        feature_df = pd.DataFrame(features_list)
+        # Clean data: replace inf and NaNs
         feature_df.replace([np.inf, -np.inf], 0, inplace=True)
         feature_df = feature_df.fillna(0)
+
+        # Save the full feature_df and labels for feature selection script
+        os.makedirs('output', exist_ok=True) # Ensure output dir exists
+        feature_df.to_csv('output/features.csv', index=False)
+        np.save('output/labels.npy', labels)
 
         print("Labels distribution :", np.bincount(labels))
 
@@ -503,49 +547,77 @@ class PaperMethodologyDREPredictor:
         # Check for single class
         unique_labels = np.unique(labels)
         if len(unique_labels) < 2:
-            return {'error': 'single_class'}
+            return {'error': 'single_class', 'message': 'Not enough unique classes (DRE/Non-DRE) for training.'}
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            feature_df, labels, test_size=0.2, random_state=42, stratify=labels
+        # Check for enough unique patients for splitting
+        unique_patient_ids = np.unique(patient_ids)
+        if len(unique_patient_ids) < 2:
+            return {'error': 'single_patient', 'message': 'Not enough unique patients for splitting.'}
+        if len(unique_patient_ids) < 5:
+            print("WARNING: Fewer than 5 unique patients. Patient-level split might be unstable or result in very small sets.")
+
+        # Determine a single label for each patient for stratified splitting of patients
+        
+        patient_label_map = pd.Series(labels, index=patient_ids).groupby(level=0).apply(lambda x: x.mode()[0])
+        unique_patient_labels = patient_label_map.loc[unique_patient_ids].values
+
+        # Perform patient-level train-test split on unique patient IDs
+        train_patient_ids, test_patient_ids, _, _ = train_test_split(
+            unique_patient_ids, unique_patient_labels,
+            test_size=0.2, # Allocate 20% of patients to the test set
+            random_state=42,
+            stratify=unique_patient_labels # Stratify to keep DRE/Non-DRE patient ratio in train/test
         )
 
+        # Create masks to select data points (recordings) belonging to train/test patients
+        train_mask = np.isin(patient_ids, train_patient_ids)
+        test_mask = np.isin(patient_ids, test_patient_ids)
+
+        X_train, y_train = feature_df[train_mask], labels[train_mask]
+        X_test, y_test = feature_df[test_mask], labels[test_mask]
+
         from collections import Counter
-        print("Data repartition :")
-        print("Train set :", Counter(y_train))
-        print("Test set :", Counter(y_test))
+        print("\nData repartition (patient-level split of recordings):")
+        print(f"Train set: {len(X_train)} recordings from {len(train_patient_ids)} patients. Labels: {Counter(y_train)}")
+        print(f"Test set: {len(X_test)} recordings from {len(test_patient_ids)} patients. Labels: {Counter(y_test)}")
         
         # Scale features
+        # Note: scaler is fit only on X_train to prevent data leakage
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
 
-        joblib.dump(self.scaler, 'output/scaler.joblib') 
-
+        # Convert scaled NumPy arrays back to DataFrames with feature names
         X_train_scaled = pd.DataFrame(X_train_scaled, columns=self.feature_names)
         X_test_scaled = pd.DataFrame(X_test_scaled, columns=self.feature_names)
+
+        # Save the scaler, scaled test features, and test labels
+        os.makedirs('output', exist_ok=True) # Ensure output dir exists before saving
+        joblib.dump(self.scaler, 'output/scaler.joblib')
+        X_test_scaled.to_csv('output/X_test_scaled.csv', index=False)
+        np.save('output/y_test.npy', y_test)
         
         # Paper validation: 5-fold cross-validation
+        # This CV is now done only on the *training data*
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        
         results = {}
         best_score = 0
         
         print(f"\n{'='*80}")
-        print("PAPER METHODOLOGY RESULTS")
+        print("PAPER METHODOLOGY RESULTS (with Patient-Level Split)")
         print(f"{'='*80}")
         print(f"{'Model':<20} {'CV Acc':<10} {'Test Acc':<10} {'Sens':<8} {'Spec':<8} {'AUC':<8}")
         print("-" * 80)
         
         for model_name, model in self.models.items():
             try:
-                # 5-fold cross-validation (paper methodology)
+                # 5-fold cross-validation on training data
                 cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring='accuracy')
                 
-                # Train and test
+                # Train model on entire training set
                 model.fit(X_train_scaled, y_train)
                 y_test_pred = model.predict(X_test_scaled)
                 
-                # Calculate paper metrics
+                # Calculate paper metrics on the held-out test set
                 test_accuracy = accuracy_score(y_test, y_test_pred)
                 cm = confusion_matrix(y_test, y_test_pred)
                 if cm.shape == (2, 2):
@@ -553,7 +625,6 @@ class PaperMethodologyDREPredictor:
                     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
                     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
                 else:
-                    # Only one class present in y_test
                     tn = fp = fn = tp = 0
                     if np.all(y_test == 1):
                         tp = np.sum(y_test_pred == 1)
@@ -567,11 +638,13 @@ class PaperMethodologyDREPredictor:
                         sensitivity = 0
                 
                 # AUC
+                auc = 0.5
                 if hasattr(model, 'predict_proba'):
                     y_prob = model.predict_proba(X_test_scaled)[:, 1]
-                    auc = roc_auc_score(y_test, y_prob)
-                else:
-                    auc = 0.5
+                    try:
+                        auc = roc_auc_score(y_test, y_prob)
+                    except ValueError: # Handle case where only one class is present in y_test
+                        auc = 0.5
                 
                 results[model_name] = {
                     'cv_accuracy_mean': cv_scores.mean(),
@@ -584,7 +657,7 @@ class PaperMethodologyDREPredictor:
                 
                 # Print results with paper targets
                 print(f"{model_name:<20} {cv_scores.mean():.3f}±{cv_scores.std():.3f} " f"{test_accuracy:.3f}     {sensitivity:.3f}   "f"{specificity:.3f}   {auc:.3f}")
-                
+                print("conf mat", cm)
                 # Track best model
                 if cv_scores.mean() > best_score:
                     best_score = cv_scores.mean()
@@ -599,20 +672,14 @@ class PaperMethodologyDREPredictor:
         print(f"{'PAPER TARGETS':<20} {'N/A':<10} {'0.915':<10} {'0.970':<8} {'0.810':<8} {'0.920':<8}")
         print(f"Best model: {self.best_model_name} with CV accuracy: {best_score:.3f}")
         
-        # Save outputs for visualization and later use
-        os.makedirs('output', exist_ok=True)
-    
-        pd.DataFrame(features_list).fillna(0).to_csv('output/features.csv', index=False)
-        np.save('output/labels.npy', labels)
+        # Save the best trained model and feature names (features.csv and labels.npy are no longer the *full* dataset)
         joblib.dump(self.best_model, 'output/best_model.joblib')
-    
+
         with open('output/feature_names.txt', 'w') as f:
             for name in self.feature_names:
                 f.write(name + '\n')
-                
+            
         return results
-
-
     
     def predict_patient(self, file_path: str) -> Dict:
         """
@@ -657,33 +724,6 @@ class PaperMethodologyDREPredictor:
             'confidence': prob_dre if prediction == 1 else 1 - prob_dre
         }
 
-        # Show paper targets
-        print("-" * 80)
-        print(f"{'PAPER TARGETS':<20} {'N/A':<10} {'0.915':<10} {'0.970':<8} {'0.810':<8} {'0.920':<8}")
-        print(f"Best model: {self.best_model_name} with CV accuracy: {best_score:.3f}")
-        # === SAVE FEATURES, LABELS, MODEL, FEATURE NAMES ===
-        output_dir = "output"
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Save features CSV
-        feature_df = pd.DataFrame(features_list).fillna(0)
-        feature_df.to_csv(os.path.join(output_dir, 'features.csv'), index=False)
-
-        # Save labels numpy array
-        np.save(os.path.join(output_dir, 'labels.npy'), labels)
-
-        # Save the best trained model
-        joblib.dump(self.best_model, os.path.join(output_dir, 'best_model.joblib'))
-
-        # Save feature names to text file
-        with open(os.path.join(output_dir, 'feature_names.txt'), 'w') as f:
-            for name in self.feature_names:
-                f.write(name + '\n')
-
-        print(f"\nSaved features, labels, model, and feature names to '{output_dir}/' folder.")
-
-        return results
-    
 
 def main():
     """
@@ -691,12 +731,12 @@ def main():
     """
     
     # =========================
-    # MODIFY THESE PATHS FOR YOUR DATA
+    #  PATHS
     # =========================
     DATA_DIRECTORY = r"C:\Users\User\OneDrive\Desktop\Drug-Resistant-Epilepsy-DRE-Prediction-Models\eeg_data\complete_dataset"
     LABELS_FILE = r"C:\Users\User\OneDrive\Desktop\Drug-Resistant-Epilepsy-DRE-Prediction-Models\labels.csv"
 
-    DURATION_SECONDS = 60  # Analysis duration
+    DURATION_SECONDS = 120  # Analysis duration
     # =========================
     
     print("="*80)
@@ -719,35 +759,30 @@ def main():
     # Load and process dataset
     print(f"\n STEP 1-6: Loading and processing EDF files...")
     try:
-        features_list, labels = predictor.load_dataset(
+        # load_dataset now returns feature_df, labels, and patient_ids
+        feature_df, labels, patient_ids = predictor.load_dataset(
             DATA_DIRECTORY, LABELS_FILE, DURATION_SECONDS
         )
+    except ValueError as e: # Catch the ValueError if labels.csv is missing patient_id
+        print(f" Error loading dataset: {e}")
+        return
     except Exception as e:
-        print(f" Error: {e}")
+        print(f" An unexpected error occurred during dataset loading: {e}")
         return
     
-    if len(features_list) == 0:
-        print(" No files processed successfully!")
+    if feature_df.empty or len(labels) == 0:
+        print(" No data processed successfully or critical data missing!")
         return
     
     # Train models
     print(f"\n STEP 7: Training ML models (Paper methodology)...")
-    results = predictor.train_and_evaluate(features_list, labels)
+    # train_and_evaluate now accepts the patient_ids
+    results = predictor.train_and_evaluate(feature_df, labels, patient_ids)
     
     if 'error' in results:
-        print(" Training failed: Need both DRE and Non-DRE patients")
+        print(f" Training failed: {results.get('message', 'Reason unknown.')}")
         return
     
-    # Test prediction
-    edf_files = glob.glob(os.path.join(DATA_DIRECTORY, "*.edf"))
-    if edf_files:
-        print(f"\n EXAMPLE PREDICTION:")
-        print("-" * 40)
-        test_result = predictor.predict_patient(edf_files[0])
-        print(f"File: {os.path.basename(edf_files[0])}")
-        print(f"Prediction: {test_result['predicted_class']}")
-        print(f"Confidence: {test_result['confidence']:.3f}")
-        print(f"Model: {test_result['model_used']}")
     
     print(f"\n Paper methodology analysis complete!")
     print(f"Best model: {predictor.best_model_name}")
@@ -755,4 +790,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
